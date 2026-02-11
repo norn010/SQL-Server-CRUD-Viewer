@@ -40,6 +40,7 @@
           </div>
           <input type="hidden" id="schemaInput" name="schema" value="{{ selected_schema or '' }}">
           <input type="hidden" id="tableInput" name="table" value="{{ selected_table or '' }}">
+          <input type="hidden" id="pageInput" name="page" value="1">
           <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">Load</button>
         </form>
       </div>
@@ -61,6 +62,7 @@
               </p>
 
               <form method="post" action="/table/{{ selected_schema }}/{{ selected_table }}/insert" class="space-y-3">
+                <input type="hidden" name="_page" value="{{ current_page }}">
                 {% for c in columns %}
                 <div>
                   <label class="mb-1 block text-sm font-medium text-slate-700">{{ c.name }}</label>
@@ -81,8 +83,29 @@
             <div class="lg:col-span-2">
               <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <h2 class="text-lg font-semibold text-slate-900">Rows</h2>
-                <div class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200">
-                  Shown: <b>{{ rows|length }}</b> / Total: <b>{{ total_rows }}</b>
+                <div class="flex flex-col items-end gap-2">
+                  <div class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200">
+                    Showing: <b>{{ row_start }}-{{ row_end }}</b> / Total: <b>{{ total_rows }}</b>
+                  </div>
+                  <div class="flex flex-wrap items-center justify-end gap-2">
+                    <span class="text-sm text-slate-500">Page {{ current_page }} of {{ total_pages }} ({{ page_size }} rows/page)</span>
+                    {% if has_prev %}
+                      <a
+                        href="/?schema={{ selected_schema }}&table={{ selected_table }}&page={{ current_page - 1 }}"
+                        class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                      >
+                        Previous
+                      </a>
+                    {% endif %}
+                    {% if has_next %}
+                      <a
+                        href="/?schema={{ selected_schema }}&table={{ selected_table }}&page={{ current_page + 1 }}"
+                        class="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+                      >
+                        Next ({{ row_end + 1 }}+)
+                      </a>
+                    {% endif %}
+                  </div>
                 </div>
               </div>
 
@@ -111,6 +134,7 @@
                     {% for row in rows %}
                       <tr class="align-top">
                         <form method="post" action="/table/{{ selected_schema }}/{{ selected_table }}/update/{{ row[pk_column] if pk_column else '' }}">
+                          <input type="hidden" name="_page" value="{{ current_page }}">
                           {% for c in columns %}
                             <td class="px-2 py-2">
                               <input
@@ -129,7 +153,7 @@
                                 </button>
                                 <button
                                   type="submit"
-                                  formaction="/table/{{ selected_schema }}/{{ selected_table }}/delete/{{ row[pk_column] }}"
+                                  formaction="/table/{{ selected_schema }}/{{ selected_table }}/delete/{{ row[pk_column] }}?page={{ current_page }}"
                                   onclick="return confirm('Delete row with {{ pk_column }}={{ row[pk_column] }} ?')"
                                   class="rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700"
                                 >

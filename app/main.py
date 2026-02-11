@@ -15,6 +15,7 @@ from .db import get_connection
 
 app = FastAPI(title="SQL Server CRUD Viewer")
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+PAGE_SIZE = 200
 
 
 def quote_ident(name: str) -> str:
@@ -70,6 +71,14 @@ def _error_text(exc: Exception) -> str:
     if isinstance(exc, pyodbc.Error) and exc.args:
         return str(exc.args[1] if len(exc.args) > 1 else exc.args[0])
     return str(exc)
+
+
+def _safe_page(value: Any, default: int = 1) -> int:
+    try:
+        page = int(str(value))
+        return page if page > 0 else default
+    except Exception:
+        return default
 
 
 def current_connection_info() -> dict[str, str]:
@@ -177,29 +186,49 @@ def table_primary_key(schema: str, table: str) -> str | None:
     return rows[0]
 
 
-def table_rows(schema: str, table: str, limit: int = 200) -> list[dict[str, Any]]:
-    cols = table_columns(schema, table)
+def table_rows(
+    schema: str,
+    table: str,
+    cols: list[dict[str, Any]],
+    limit: int = PAGE_SIZE,
+    offset: int = 0,
+    order_column: str | None = None,
+) -> list[dict[str, Any]]:
     if not cols:
         return []
+    sort_col = order_column or cols[0]["name"]
     table_sql = f"{quote_ident(schema)}.{quote_ident(table)}"
-    query = f"SELECT TOP ({int(limit)}) * FROM {table_sql}"
+    query = (
+        f"SELECT * FROM {table_sql} "
+        f"ORDER BY {quote_ident(sort_col)} "
+        "OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
+    )
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(query)
+        cur.execute(query, int(offset), int(limit))
         rows = cur.fetchall()
     col_names = [c["name"] for c in cols]
     return [dict(zip(col_names, row)) for row in rows]
 
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request, schema: str | None = None, table: str | None = None):
+def home(
+    request: Request,
+    schema: str | None = None,
+    table: str | None = None,
+    page: str | None = None,
+):
     tables = list_tables()
     connection = current_connection_info()
+    current_page = _safe_page(page, 1)
     selected_schema = schema
     selected_table = table
     columns: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     total_rows = 0
+    total_pages = 1
+    row_start = 0
+    row_end = 0
     pk_column: str | None = None
     error_message: str | None = request.query_params.get("error")
 
@@ -209,8 +238,22 @@ def home(request: Request, schema: str | None = None, table: str | None = None):
             if not columns:
                 raise HTTPException(status_code=404, detail="Table not found")
             pk_column = table_primary_key(schema, table)
-            rows = table_rows(schema, table, limit=200)
             total_rows = table_count(schema, table)
+            total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
+            current_page = min(current_page, total_pages)
+            offset = (current_page - 1) * PAGE_SIZE
+            order_column = pk_column or columns[0]["name"]
+            rows = table_rows(
+                schema,
+                table,
+                cols=columns,
+                limit=PAGE_SIZE,
+                offset=offset,
+                order_column=order_column,
+            )
+            if total_rows > 0:
+                row_start = offset + 1
+                row_end = min(offset + len(rows), total_rows)
         except Exception as exc:  # pragma: no cover
             error_message = str(exc)
 
@@ -225,6 +268,13 @@ def home(request: Request, schema: str | None = None, table: str | None = None):
             "columns": columns,
             "rows": rows,
             "total_rows": total_rows,
+            "current_page": current_page,
+            "total_pages": total_pages,
+            "page_size": PAGE_SIZE,
+            "row_start": row_start,
+            "row_end": row_end,
+            "has_prev": current_page > 1,
+            "has_next": current_page < total_pages,
             "pk_column": pk_column,
             "error_message": error_message,
         },
@@ -234,6 +284,7 @@ def home(request: Request, schema: str | None = None, table: str | None = None):
 @app.post("/table/{schema}/{table}/insert")
 async def insert_row(schema: str, table: str, request: Request):
     form = await request.form()
+    current_page = _safe_page(form.get("_page"), 1)
     cols = table_columns(schema, table)
     if not cols:
         raise HTTPException(status_code=404, detail="Table not found")
@@ -251,7 +302,10 @@ async def insert_row(schema: str, table: str, request: Request):
                 values[name] = normalize_input_value(raw, str(col.get("data_type", "")))
             except Exception as exc:
                 return RedirectResponse(
-                    url=f"/?schema={schema}&table={table}&error={quote_plus(f'Invalid value for {name}: {exc}')}",
+                    url=(
+                        f"/?schema={schema}&table={table}&page={current_page}"
+                        f"&error={quote_plus(f'Invalid value for {name}: {exc}')}"
+                    ),
                     status_code=303,
                 )
 
@@ -270,12 +324,15 @@ async def insert_row(schema: str, table: str, request: Request):
             conn.commit()
     except Exception as exc:
         return RedirectResponse(
-            url=f"/?schema={schema}&table={table}&error={quote_plus(_error_text(exc))}",
+            url=(
+                f"/?schema={schema}&table={table}&page={current_page}"
+                f"&error={quote_plus(_error_text(exc))}"
+            ),
             status_code=303,
         )
 
     return RedirectResponse(
-        url=f"/?schema={schema}&table={table}",
+        url=f"/?schema={schema}&table={table}&page={current_page}",
         status_code=303,
     )
 
@@ -288,6 +345,7 @@ async def update_row(schema: str, table: str, pk_value: str, request: Request):
         raise HTTPException(status_code=400, detail="Table or primary key not found")
 
     form = await request.form()
+    current_page = _safe_page(form.get("_page"), 1)
     allowed_cols = {c["name"] for c in cols}
     set_values: dict[str, Any] = {}
     col_map = {c["name"]: c for c in cols}
@@ -301,7 +359,10 @@ async def update_row(schema: str, table: str, pk_value: str, request: Request):
                 set_values[key] = normalize_input_value(raw, str(col_map[key].get("data_type", "")))
             except Exception as exc:
                 return RedirectResponse(
-                    url=f"/?schema={schema}&table={table}&error={quote_plus(f'Invalid value for {key}: {exc}')}",
+                    url=(
+                        f"/?schema={schema}&table={table}&page={current_page}"
+                        f"&error={quote_plus(f'Invalid value for {key}: {exc}')}"
+                    ),
                     status_code=303,
                 )
 
@@ -323,19 +384,23 @@ async def update_row(schema: str, table: str, pk_value: str, request: Request):
             conn.commit()
     except Exception as exc:
         return RedirectResponse(
-            url=f"/?schema={schema}&table={table}&error={quote_plus(_error_text(exc))}",
+            url=(
+                f"/?schema={schema}&table={table}&page={current_page}"
+                f"&error={quote_plus(_error_text(exc))}"
+            ),
             status_code=303,
         )
 
     return RedirectResponse(
-        url=f"/?schema={schema}&table={table}",
+        url=f"/?schema={schema}&table={table}&page={current_page}",
         status_code=303,
     )
 
 
 @app.post("/table/{schema}/{table}/delete/{pk_value}")
-def delete_row(schema: str, table: str, pk_value: str):
+def delete_row(schema: str, table: str, pk_value: str, page: str | None = None):
     pk_col = table_primary_key(schema, table)
+    current_page = _safe_page(page, 1)
     if not pk_col:
         raise HTTPException(status_code=400, detail="Primary key not found")
 
@@ -348,12 +413,15 @@ def delete_row(schema: str, table: str, pk_value: str):
             conn.commit()
     except Exception as exc:
         return RedirectResponse(
-            url=f"/?schema={schema}&table={table}&error={quote_plus(_error_text(exc))}",
+            url=(
+                f"/?schema={schema}&table={table}&page={current_page}"
+                f"&error={quote_plus(_error_text(exc))}"
+            ),
             status_code=303,
         )
 
     return RedirectResponse(
-        url=f"/?schema={schema}&table={table}",
+        url=f"/?schema={schema}&table={table}&page={current_page}",
         status_code=303,
     )
 
