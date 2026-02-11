@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQL Server CRUD Viewer</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    h1 { margin-bottom: 8px; }
+    .row { margin: 12px 0; }
+    .error { color: #b91c1c; margin: 8px 0; }
+    .info { color: #1f2937; margin: 8px 0; }
+    .hint { color: #374151; margin: 8px 0; font-size: 13px; }
+    select, input, button { padding: 6px 8px; margin: 2px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #ddd; padding: 6px; vertical-align: top; }
+    th { background: #f5f5f5; }
+    .nowrap { white-space: nowrap; }
+    .muted { color: #555; font-size: 12px; }
+    .form-table { width: 700px; max-width: 100%; border-collapse: collapse; margin: 8px 0; }
+    .form-table td { border: none; padding: 4px 6px; }
+    .form-table td:first-child { width: 180px; font-weight: 600; }
+    .form-table input { width: 100%; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <h1>SQL Server CRUD Viewer</h1>
+  <div class="muted">View, insert, update, and delete data directly from SQL Server</div>
+  <div class="info">
+    Target: <b>{{ connection.target_server }}</b>
+    | Connected to: <b>{{ connection.server_name }}</b> (instance: <b>{{ connection.instance_name }}</b>)
+    | Database: <b>{{ connection.database_name }}</b>
+  </div>
+
+  <form method="get" action="/" class="row">
+    <label for="tableKey">Select table:</label>
+    <select id="tableKey" name="table_key" onchange="syncSchemaTable(this.value)">
+      <option value="">-- choose table --</option>
+      {% for t in tables %}
+      {% set key = t.schema + "." + t.name %}
+      <option value="{{ key }}" {% if selected_schema == t.schema and selected_table == t.name %}selected{% endif %}>
+        {{ key }}
+      </option>
+      {% endfor %}
+    </select>
+    <input type="hidden" id="schemaInput" name="schema" value="{{ selected_schema or '' }}">
+    <input type="hidden" id="tableInput" name="table" value="{{ selected_table or '' }}">
+    <button type="submit">Load</button>
+  </form>
+
+  {% if error_message %}
+    <div class="error">{{ error_message }}</div>
+  {% endif %}
+
+  {% if selected_schema and selected_table and columns %}
+    <h3>Insert row: {{ selected_schema }}.{{ selected_table }}</h3>
+    <div class="hint">Date: <b>YYYY-MM-DD</b> | Datetime: <b>YYYY-MM-DD HH:MM:SS</b> | Number: ใส่ตัวเลขเท่านั้น</div>
+    <form method="post" action="/table/{{ selected_schema }}/{{ selected_table }}/insert" class="row">
+      <table class="form-table">
+        {% for c in columns %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td>
+            <input
+              name="{{ c.name }}"
+              placeholder="{{ c.data_type }}{% if c.nullable %} (nullable){% endif %}{% if c.is_identity %} (identity){% endif %}"
+              {% if c.is_identity %}disabled{% endif %}
+            >
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      <div><button type="submit">Insert</button></div>
+    </form>
+
+    <h3>Rows shown: {{ rows|length }} / total in table: {{ total_rows }}</h3>
+    {% if total_rows == 0 %}
+      <div class="hint">ตารางนี้บนฐานข้อมูลที่กำลังเชื่อมต่ออยู่ยังไม่มีข้อมูล</div>
+    {% endif %}
+    {% if not pk_column %}
+      <div class="error">This table has no single-column primary key, so update/delete is disabled.</div>
+    {% endif %}
+    <table>
+      <thead>
+      <tr>
+        {% for c in columns %}
+          <th>{{ c.name }}</th>
+        {% endfor %}
+        <th class="nowrap">Action</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <form method="post" action="/table/{{ selected_schema }}/{{ selected_table }}/update/{{ row[pk_column] if pk_column else '' }}">
+            {% for c in columns %}
+              <td>
+                {% if c.name == pk_column %}
+                  <input name="{{ c.name }}" value="{{ row[c.name] if row[c.name] is not none else '' }}" readonly>
+                {% else %}
+                  <input name="{{ c.name }}" value="{{ row[c.name] if row[c.name] is not none else '' }}">
+                {% endif %}
+              </td>
+            {% endfor %}
+            <td class="nowrap">
+              {% if pk_column %}
+                <button type="submit">Save</button>
+              {% endif %}
+          </form>
+              {% if pk_column %}
+              <form method="post" action="/table/{{ selected_schema }}/{{ selected_table }}/delete/{{ row[pk_column] }}" style="display:inline">
+                <button type="submit" onclick="return confirm('Delete row with {{ pk_column }}={{ row[pk_column] }} ?')">Delete</button>
+              </form>
+              {% endif %}
+            </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <script>
+    function syncSchemaTable(value) {
+      const schemaInput = document.getElementById('schemaInput');
+      const tableInput = document.getElementById('tableInput');
+      if (!value || value.indexOf('.') < 0) {
+        schemaInput.value = '';
+        tableInput.value = '';
+        return;
+      }
+      const parts = value.split('.');
+      schemaInput.value = parts[0];
+      tableInput.value = parts.slice(1).join('.');
+    }
+  </script>
+</body>
+</html>
